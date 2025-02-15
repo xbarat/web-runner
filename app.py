@@ -29,92 +29,72 @@ def parse_query(text):
 def search_flights(params):
     """Search flights using Playwright to scrape Google Flights"""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # Set to False to help with bot detection
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         )
         page = context.new_page()
         
-        # Format the Google Flights URL
         url = (f"https://www.google.com/travel/flights?q=Flights%20to%20"
                f"{params['destination']}%20from%20{params['origin']}%20on%20"
                f"{params['departure_date']}")
         
         print("\nSearching flights...")
         try:
-            # Navigate to the page
             page.goto(url)
             
-            # Wait for any of these selectors that might indicate results have loaded
-            selectors = [
-                '[role="main"] [role="list"]',
-                '[role="main"] [role="article"]',
-                'div[class*="gws-flights-results__"]',
-                'div[class*="gws-flights__"]'
-            ]
-            
-            # Try each selector with longer timeout
-            selector_found = False
-            for selector in selectors:
-                try:
-                    print(f"Trying selector: {selector}")
-                    page.wait_for_selector(selector, timeout=8000)
-                    print(f"Found results with selector: {selector}")
-                    selector_found = True
-                    break
-                except Exception as e:
-                    print(f"Selector {selector} not found: {str(e)}")
-                    continue
-            
-            if not selector_found:
-                print("No selectors matched. Trying alternative approach...")
+            # Wait for the main content to load
+            print("Waiting for main content...")
+            page.wait_for_selector('[role="main"]', timeout=10000)
             
             # Additional wait for dynamic content
             page.wait_for_timeout(5000)
             
-            # Try multiple selectors for flight cards
-            flight_elements = []
-            card_selectors = [
-                'div[role="listitem"]',
-                '[role="main"] li',
-                'div[class*="gws-flights-results__result-item"]',
-                'div[class*="gws-flights__"]'
-            ]
+            # Find flight cards
+            print("Looking for flight cards...")
+            flight_elements = page.query_selector_all('[role="main"] li')
             
-            for selector in card_selectors:
-                print(f"Trying to find flight cards with selector: {selector}")
-                flight_elements = page.query_selector_all(selector)
-                if flight_elements:
-                    print(f"Found {len(flight_elements)} flight elements with selector: {selector}")
-                    break
+            if not flight_elements:
+                print("No flight elements found")
+                return []
+                
+            print(f"Found {len(flight_elements)} potential flight elements")
             
             flights = []
             for elem in flight_elements[:3]:  # Get first 3 flights
                 try:
-                    # Take a screenshot of the element for debugging
-                    elem.screenshot(path=f"flight_card_{len(flights)}.png")
+                    # Get the raw HTML for debugging
+                    html_content = elem.inner_html()
+                    print(f"\nProcessing flight card:\n{html_content[:200]}...")
                     
-                    # Try multiple selectors for each piece of information
+                    # Updated selectors based on the actual HTML structure
                     airline = None
                     airline_selectors = [
-                        '[class*="airline"]', 
-                        '[class*="carrier"]',
-                        'img[alt*="airline"]',
-                        '[class*="operator"]'
+                        'img[alt*="logo"]',  # Airline logos often have "logo" in alt text
+                        '.JMc5Xc',           # Class seen in the HTML
+                        '[class*="operator"]',
+                        '[class*="airline"]'
                     ]
                     for airline_selector in airline_selectors:
                         airline = elem.query_selector(airline_selector)
                         if airline:
                             print(f"Found airline with selector: {airline_selector}")
-                            break
+                            # If it's an image, try to get the alt text
+                            if 'img' in airline_selector:
+                                airline_text = airline.get_attribute('alt')
+                            else:
+                                airline_text = airline.inner_text()
+                            if airline_text:
+                                break
                     
+                    # Try to find price
                     price = None
                     price_selectors = [
-                        '[class*="price"]',
-                        '[class*="amount"]',
-                        'span[class*="gws-flights-results__price"]',
-                        'div[class*="gws-flights-results__price"]'
+                        '[class*="YMlIz"]',    # Common price class
+                        '[class*="gQ6yfe"]',   # Class from the HTML
+                        'span:has-text("$")',  # Any span containing a dollar sign
+                        '[class*="price"]'
                     ]
                     for price_selector in price_selectors:
                         price = elem.query_selector(price_selector)
@@ -122,29 +102,27 @@ def search_flights(params):
                             print(f"Found price with selector: {price_selector}")
                             break
                     
-                    time_elements = []
+                    # Try to find time information
+                    time_info = None
                     time_selectors = [
+                        '.zxVSec',           # Time class
+                        '.vmXl8d',           # Duration class
                         '[class*="time"]',
-                        '[class*="duration"]',
-                        '[class*="gws-flights-results__times"]',
-                        '[class*="gws-flights-results__duration"]'
+                        '[class*="duration"]'
                     ]
                     for time_selector in time_selectors:
-                        time_elements = elem.query_selector_all(time_selector)
-                        if time_elements:
-                            print(f"Found time elements with selector: {time_selector}")
+                        time_info = elem.query_selector(time_selector)
+                        if time_info:
+                            print(f"Found time info with selector: {time_selector}")
                             break
                     
-                    # Get the raw HTML for debugging
-                    html_content = elem.inner_html()
-                    print(f"\nFlight card HTML:\n{html_content[:200]}...")  # Print first 200 chars
-                    
-                    if airline or price:  # At least one piece of information found
+                    # If we found any information, add it to flights
+                    if airline_text or price:
                         flight_info = {
-                            "airline": airline.inner_text() if airline else "Unknown Airline",
-                            "price": price.inner_text().replace('$', '').strip() if price else "Price not available",
-                            "departure_time": time_elements[0].inner_text() if time_elements else "Time not available",
-                            "duration": time_elements[1].inner_text() if len(time_elements) > 1 else "Duration not available"
+                            "airline": airline_text if airline_text else "Unknown Airline",
+                            "price": price.inner_text().strip() if price else "Price not available",
+                            "departure_time": time_info.inner_text() if time_info else "Time not available",
+                            "duration": "Duration not available"  # We'll add duration in a future update
                         }
                         print(f"Extracted flight info: {flight_info}")
                         flights.append(flight_info)
@@ -164,7 +142,6 @@ def search_flights(params):
             return []
         
         finally:
-            # Take a final screenshot before closing
             try:
                 page.screenshot(path="final_page.png")
             except:
