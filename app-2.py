@@ -1,56 +1,105 @@
 import requests
+import openai
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+import json
 
-def get_bitcoin_price():
-    """Retrieve current Bitcoin price using CoinGecko API"""
+# Load environment variables
+load_dotenv()
+
+# Initialize OpenAI client
+client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+def parse_query(text: str) -> dict:
+    """Use LLM to extract cryptocurrency and currency from natural language query"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": f"Extract cryptocurrency and currency from: {text}"
+            }],
+            functions=[{
+                "name": "get_crypto_price",
+                "description": "Get current cryptocurrency price",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cryptocurrency": {
+                            "type": "string",
+                            "enum": ["bitcoin", "ethereum", "solana"],
+                            "description": "Cryptocurrency to get price for"
+                        },
+                        "currency": {
+                            "type": "string",
+                            "enum": ["usd", "eur", "gbp"],
+                            "description": "Fiat currency for price display"
+                        }
+                    },
+                    "required": ["cryptocurrency", "currency"]
+                }
+            }],
+            function_call={"name": "get_crypto_price"}
+        )
+        
+        args = json.loads(response.choices[0].message.function_call.arguments)
+        return args
+        
+    except Exception as e:
+        raise ValueError(f"LLM parsing error: {str(e)}")
+
+def get_crypto_price(crypto: str, currency: str) -> dict:
+    """Retrieve cryptocurrency price using CoinGecko API"""
     try:
         response = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={
-                "ids": "bitcoin",
-                "vs_currencies": "usd",
+                "ids": crypto,
+                "vs_currencies": currency,
                 "include_last_updated_at": "true"
             }
         )
         response.raise_for_status()
         data = response.json()
         
-        if "last_updated_at" not in data["bitcoin"]:
-            return {"error": "API response missing timestamp data"}
-            
         return {
-            "price": data["bitcoin"]["usd"],
-            "last_updated": datetime.fromtimestamp(data["bitcoin"]["last_updated_at"]),
-            "currency": "USD"
+            "price": data[crypto][currency],
+            "last_updated": datetime.fromtimestamp(data[crypto]["last_updated_at"]),
+            "currency": currency.upper(),
+            "crypto": crypto.capitalize()
         }
             
     except requests.exceptions.RequestException as e:
         return {"error": f"API Error: {str(e)}"}
-    except (KeyError, TypeError) as e:
+    except KeyError as e:
         return {"error": f"Data parsing error: {str(e)}"}
-    except ValueError as e:
-        return {"error": f"Invalid timestamp format: {str(e)}"}
 
-def format_response(price_data):
-    """Format the price data for user display"""
-    if "error" in price_data:
-        return f"❌ Error: {price_data['error']}"
+def handle_query(query: str) -> str:
+    """RAG-based query handler with API orchestration"""
+    try:
+        # LLM-based parsing
+        params = parse_query(query)
         
-    return (
-        f"₿ Bitcoin Price Update\n"
-        f"-----------------------\n"
-        f"Price: ${price_data['price']:,.2f}\n"
-        f"Last Updated: {price_data['last_updated'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-        f"Currency: {price_data['currency']}"
-    )
-
-def handle_query(query):
-    """Simple RAG-style query handler"""
-    if not any(keyword in query.lower() for keyword in ["bitcoin", "btc", "price"]):
-        return "I specialize in Bitcoin price information. Ask me about BTC's current value."
-    
-    price_data = get_bitcoin_price()
-    return format_response(price_data)
+        # API call orchestration
+        price_data = get_crypto_price(
+            params['cryptocurrency'],
+            params['currency']
+        )
+        
+        # Format response
+        if "error" in price_data:
+            return f"❌ Error: {price_data['error']}"
+            
+        return (
+            f"💰 {price_data['crypto']} Price\n"
+            f"-----------------------\n"
+            f"Price: {price_data['currency']} {price_data['price']:,.2f}\n"
+            f"Last Updated: {price_data['last_updated'].strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+        
+    except Exception as e:
+        return f"❌ System error: {str(e)}"
 
 def main():
     print("Bitcoin Price Checker")
